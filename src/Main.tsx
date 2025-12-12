@@ -414,7 +414,7 @@ export default function App() {
 
   const handleDelete = async (id: string) => {
     if (!user) return;
-    if (confirm('정말 삭제하시겠습니까?')) {
+    if (window.confirm('정말 삭제하시겠습니까?')) {
       try {
         await deleteDoc(doc(db, 'families', SHARED_APP_ID, 'assets', id));
       } catch (e) { alert("삭제 실패"); }
