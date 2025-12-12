@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { initializeApp } from "firebase/app";
 import {
   getFirestore,
@@ -8,9 +8,6 @@ import {
   deleteDoc,
   updateDoc,
   doc,
-  serverTimestamp,
-  query, 
-  orderBy
 } from "firebase/firestore";
 import { 
   getAuth, 
@@ -38,7 +35,9 @@ import {
   Users,
   AlertCircle,
   Loader2,
-  Globe
+  Globe,
+  Edit3,
+  Repeat
 } from "lucide-react";
 
 // --- 1. Firebase Configuration ---
@@ -51,23 +50,25 @@ const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 // --- Types ---
 type AssetType = "Cash" | "Stock" | "RealEstate" | "Crypto" | "Other";
 type ColorTheme = "global" | "korea";
+type ExchangeMode = "auto" | "manual";
+type DisplayCurrency = "KRW" | "USD";
 
 interface Asset {
   id: string;
   name: string;
-  amount: number;
-  purchaseAmount: number;
+  amount: number; // Always stored in KRW
+  purchaseAmount: number; // Always stored in KRW
   category: AssetType;
   ticker?: string;
   quantity?: number;
-  currentPrice?: number;
+  currentPrice?: number; // Always stored in KRW
   date: string;
 }
 
 interface AssetHistory {
   id?: string;
   date: string;
-  totalValue: number;
+  totalValue: number; // KRW
 }
 
 interface TreemapItem extends Asset {
@@ -106,9 +107,21 @@ const categoryColors: Record<AssetType, string> = {
   Other: "#6b7280",
 };
 
-// --- Components ---
+// --- Components (Modified to accept formatter) ---
 
-const Treemap = ({ assets, width, height, theme }: { assets: Asset[]; width: number; height: number; theme: ColorTheme }) => {
+const Treemap = ({ 
+  assets, 
+  width, 
+  height, 
+  theme,
+  formatValue
+}: { 
+  assets: Asset[]; 
+  width: number; 
+  height: number; 
+  theme: ColorTheme;
+  formatValue: (val: number) => string;
+}) => {
   if (assets.length === 0) return <div className="flex items-center justify-center h-full text-gray-400">데이터 없음</div>;
 
   const items: TreemapItem[] = [];
@@ -162,7 +175,7 @@ const Treemap = ({ assets, width, height, theme }: { assets: Asset[]; width: num
             key={item.id}
             className="absolute border border-white/50 flex flex-col items-center justify-center p-1 text-center transition-all hover:brightness-110 hover:z-10 cursor-pointer overflow-hidden"
             style={{ left: `${item.x}%`, top: `${item.y}%`, width: `${item.w}%`, height: `${item.h}%`, backgroundColor: item.color }}
-            title={`${item.name}\n비중: ${((item.amount / total) * 100).toFixed(1)}%\n수익률: ${roi.toFixed(2)}%`}
+            title={`${item.name}\n비중: ${((item.amount / total) * 100).toFixed(1)}%\n평가액: ${formatValue(item.amount)}\n수익률: ${roi.toFixed(2)}%`}
           >
             <span className="font-bold text-gray-800 text-[10px] sm:text-xs truncate w-full px-1">{item.name}</span>
             {item.h > 15 && item.w > 15 && (
@@ -177,17 +190,26 @@ const Treemap = ({ assets, width, height, theme }: { assets: Asset[]; width: num
   );
 };
 
-const LineChart = ({ data }: { data: AssetHistory[] }) => {
+const LineChart = ({ 
+  data, 
+  formatValue,
+  getConvertedValue
+}: { 
+  data: AssetHistory[];
+  formatValue: (val: number) => string;
+  getConvertedValue: (val: number) => number;
+}) => {
   if (data.length < 2) return <div className="flex h-full items-center justify-center text-gray-400 text-sm">데이터가 충분하지 않습니다 (최소 2일 필요)</div>;
 
   const sorted = [...data].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-  const values = sorted.map((d) => d.totalValue);
+  const values = sorted.map((d) => getConvertedValue(d.totalValue)); // Convert values for chart
   const min = Math.min(...values) * 0.98;
   const max = Math.max(...values) * 1.02;
   const range = max - min || 1;
   const points = sorted.map((d, i) => {
+    const val = getConvertedValue(d.totalValue);
     const x = (i / (sorted.length - 1)) * 100;
-    const y = 100 - ((d.totalValue - min) / range) * 100;
+    const y = 100 - ((val - min) / range) * 100;
     return `${x},${y}`;
   }).join(" ");
 
@@ -199,9 +221,10 @@ const LineChart = ({ data }: { data: AssetHistory[] }) => {
         ))}
         <polyline points={points} fill="none" stroke="#3b82f6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
         {sorted.map((d, i) => {
+          const val = getConvertedValue(d.totalValue);
           const x = (i / (sorted.length - 1)) * 100;
-          const y = 100 - ((d.totalValue - min) / range) * 100;
-          return <circle key={i} cx={x} cy={y} r="1.5" fill="white" stroke="#3b82f6" strokeWidth="1"><title>{d.date}: {Math.round(d.totalValue).toLocaleString()}원</title></circle>;
+          const y = 100 - ((val - min) / range) * 100;
+          return <circle key={i} cx={x} cy={y} r="1.5" fill="white" stroke="#3b82f6" strokeWidth="1"><title>{d.date}: {formatValue(d.totalValue)}</title></circle>;
         })}
       </svg>
       <div className="absolute bottom-0 left-0 text-[10px] text-gray-400 transform translate-y-full pt-1">{sorted[0].date}</div>
@@ -218,7 +241,13 @@ export default function App() {
   const [loading, setLoading] = useState(true);
 
   // Global States
-  const [exchangeRate, setExchangeRate] = useState<number>(1400); // Default fallback
+  const [exchangeRate, setExchangeRate] = useState<number>(1400); 
+  const [exchangeMode, setExchangeMode] = useState<ExchangeMode>(() => (localStorage.getItem("exchange-mode") as ExchangeMode) || "auto");
+  const [manualRate, setManualRate] = useState<number>(() => parseFloat(localStorage.getItem("manual-rate") || "1430"));
+  
+  // NEW: Display Currency State
+  const [currency, setCurrency] = useState<DisplayCurrency>(() => (localStorage.getItem("display-currency") as DisplayCurrency) || "KRW");
+  
   const [apiKey, setApiKey] = useState(() => localStorage.getItem("finnhub-api-key") || "");
   const [theme, setTheme] = useState<ColorTheme>(() => (localStorage.getItem("asset-theme") as ColorTheme) || "global");
 
@@ -230,6 +259,7 @@ export default function App() {
   const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
   const [tradeType, setTradeType] = useState<"buy" | "sell">("buy");
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [refreshProgress, setRefreshProgress] = useState(0); 
   const [testStatus, setTestStatus] = useState<"idle" | "success" | "error">("idle");
   const [authError, setAuthError] = useState<string | null>(null);
 
@@ -242,26 +272,62 @@ export default function App() {
   const [tradePrice, setTradePrice] = useState("");
   const [tradeQuantity, setTradeQuantity] = useState("");
 
-  // --- 0. Fetch Exchange Rate (Open API) ---
-  const fetchExchangeRate = async () => {
-    try {
-      // 공개 API 사용 (Key 불필요)
-      const res = await fetch("https://api.exchangerate-api.com/v4/latest/USD");
-      const data = await res.json();
-      if (data && data.rates && data.rates.KRW) {
-        setExchangeRate(data.rates.KRW);
-        console.log("Updated Exchange Rate:", data.rates.KRW);
-        return data.rates.KRW;
-      }
-    } catch (e) {
-      console.error("Failed to fetch exchange rate, using fallback.", e);
+  // --- Currency Helpers ---
+  // Core function to display money based on selected currency
+  const formatValue = (krwValue: number) => {
+    if (currency === "KRW") {
+      return new Intl.NumberFormat("ko-KR", { 
+        style: "currency", 
+        currency: "KRW",
+        maximumFractionDigits: 0 
+      }).format(krwValue);
+    } else {
+      const usdValue = krwValue / exchangeRate;
+      return new Intl.NumberFormat("en-US", { 
+        style: "currency", 
+        currency: "USD",
+        maximumFractionDigits: 2 
+      }).format(usdValue);
     }
-    return exchangeRate; // Return existing if failed
   };
 
+  const getConvertedValue = (krwValue: number) => {
+    return currency === "KRW" ? krwValue : krwValue / exchangeRate;
+  };
+
+  const toggleCurrency = () => {
+    const next = currency === "KRW" ? "USD" : "KRW";
+    setCurrency(next);
+    localStorage.setItem("display-currency", next);
+  };
+
+  // --- 0. Exchange Rate Logic ---
   useEffect(() => {
-    fetchExchangeRate();
-  }, []);
+    localStorage.setItem("exchange-mode", exchangeMode);
+    localStorage.setItem("manual-rate", manualRate.toString());
+    
+    if (exchangeMode === 'manual') {
+      setExchangeRate(manualRate);
+    } else {
+      fetchExchangeRate();
+    }
+  }, [exchangeMode, manualRate]);
+
+  const fetchExchangeRate = async () => {
+    if (exchangeMode === 'manual') return manualRate;
+    try {
+      const res = await fetch("https://api.exchangerate-api.com/v4/latest/USD");
+      if (!res.ok) throw new Error("Primary API failed");
+      const data = await res.json();
+      const rate = data.rates.KRW;
+      setExchangeRate(rate);
+      return rate;
+    } catch (e) {
+      console.warn("Exchange API failed, fallback to manual.", e);
+      setExchangeRate(manualRate);
+      return manualRate;
+    }
+  };
 
   // --- 1. Authentication ---
   useEffect(() => {
@@ -301,8 +367,7 @@ export default function App() {
         setAssets(loadedAssets);
         setLoading(false);
       }, (error) => {
-        console.error("Assets Sync Error:", error);
-        setAuthError("데이터 권한 오류: 페이지를 새로고침 해보세요.");
+        setAuthError("데이터 동기화 오류. 잠시 후 다시 시도하세요.");
       }
     );
 
@@ -312,7 +377,7 @@ export default function App() {
           ...doc.data(),
         } as AssetHistory));
         setHistory(loadedHistory);
-      }, (error) => console.error("History Sync Error:", error)
+      }
     );
 
     return () => {
@@ -355,7 +420,15 @@ export default function App() {
     e.preventDefault();
     if (!user) return;
 
+    // Input is assumed to be KRW for simplicity, or user converts mentally. 
+    // Ideally we could add currency selector for input too, but keeping simple for now.
     let finalAmount = parseInt(amountInput.replace(/,/g, "")) || 0;
+    
+    // If inputting while in USD mode, assume user entered USD and convert to KRW for storage
+    if (currency === 'USD') {
+      finalAmount = finalAmount * exchangeRate;
+    }
+
     let finalPrice = 0;
     let qty = parseFloat(quantity) || 0;
 
@@ -386,21 +459,24 @@ export default function App() {
     e.preventDefault();
     if (!selectedAsset || !user) return;
 
-    const price = parseFloat(tradePrice);
+    const price = parseFloat(tradePrice); // User inputs price in CURRENTLY SELECTED CURRENCY
     const qty = parseFloat(tradeQuantity);
     if (!price || !qty) return;
 
     let updated = { ...selectedAsset };
     delete (updated as any).id;
 
+    // Convert input price to KRW for calculation if in USD mode
+    const priceInKrw = currency === "USD" ? price * exchangeRate : price;
+
     if (tradeType === "buy") {
       const oldQty = updated.quantity || 0;
       const oldCost = updated.purchaseAmount;
-      const addCost = price * qty;
+      const addCost = priceInKrw * qty;
       updated.quantity = oldQty + qty;
       updated.purchaseAmount = oldCost + addCost;
-      updated.currentPrice = price;
-      updated.amount = (updated.currentPrice || price) * updated.quantity;
+      updated.currentPrice = priceInKrw;
+      updated.amount = (updated.currentPrice || priceInKrw) * updated.quantity;
     } else {
       const oldQty = updated.quantity || 0;
       if (qty >= oldQty) {
@@ -413,7 +489,7 @@ export default function App() {
       const ratio = qty / oldQty;
       updated.purchaseAmount = updated.purchaseAmount * (1 - ratio);
       updated.quantity = oldQty - qty;
-      updated.amount = (updated.currentPrice || price) * updated.quantity;
+      updated.amount = (updated.currentPrice || priceInKrw) * updated.quantity;
     }
 
     try {
@@ -431,10 +507,15 @@ export default function App() {
     }
   };
 
+  // --- Price Refresh Logic ---
   const fetchPrice = async (symbol: string): Promise<number | null> => {
     if (!apiKey) return null;
     try {
       const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${apiKey}`);
+      if (!res.ok) {
+        if (res.status === 429) console.warn("Rate limit hit for", symbol);
+        return null;
+      }
       const data = await res.json();
       return data.c;
     } catch { return null; }
@@ -442,23 +523,25 @@ export default function App() {
 
   const refreshPrices = async () => {
     setIsRefreshing(true);
+    setRefreshProgress(0);
+
     if (!apiKey) {
       alert("설정에서 API 키를 입력해주세요.");
       setIsRefreshing(false);
       return;
     }
     
-    // Refresh Exchange Rate First
     const currentRate = await fetchExchangeRate();
-    
-    await Promise.all(assets.map(async (a) => {
-      if (a.ticker && (a.category === "Stock" || a.category === "Crypto")) {
+    const targets = assets.filter(a => a.ticker && (a.category === "Stock" || a.category === "Crypto"));
+    let processed = 0;
+
+    for (const a of targets) {
+      await new Promise(r => setTimeout(r, 500)); 
+      if (a.ticker) {
         const price = await fetchPrice(a.ticker);
         if (price) {
           const isKorean = a.ticker.toUpperCase().endsWith(".KS") || a.ticker.toUpperCase().endsWith(".KQ");
-          // Use dynamic rate here
           const finalPrice = isKorean ? price : price * currentRate; 
-          
           const updatedFields = {
             currentPrice: Math.floor(finalPrice),
             amount: Math.floor(finalPrice * (a.quantity || 1)),
@@ -468,8 +551,12 @@ export default function App() {
           } catch (e) { console.error("Price Update Failed", a.name); }
         }
       }
-    }));
+      processed++;
+      setRefreshProgress((processed / targets.length) * 100);
+    }
+    
     setIsRefreshing(false);
+    setRefreshProgress(0);
   };
 
   const testApiKey = async () => {
@@ -491,7 +578,7 @@ export default function App() {
   const openTradeModal = (asset: Asset, type: "buy" | "sell") => {
     setSelectedAsset(asset);
     setTradeType(type);
-    setTradePrice(asset.currentPrice ? asset.currentPrice.toString() : "");
+    setTradePrice(asset.currentPrice ? (currency === 'USD' ? asset.currentPrice / exchangeRate : asset.currentPrice).toString() : "");
     setTradeQuantity("");
     setTradeModalOpen(true);
   };
@@ -508,8 +595,6 @@ export default function App() {
   const totalPurchase = assets.reduce((sum, a) => sum + a.purchaseAmount, 0);
   const totalReturn = totalAssets - totalPurchase;
   const totalReturnRate = totalPurchase === 0 ? 0 : (totalReturn / totalPurchase) * 100;
-
-  const formatMoney = (val: number) => new Intl.NumberFormat("ko-KR", { style: "currency", currency: "KRW" }).format(val);
 
   if (loading) {
     return <div className="min-h-screen flex items-center justify-center"><Loader2 className="animate-spin text-blue-500 w-8 h-8" /></div>;
@@ -530,28 +615,77 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-800 font-sans p-2 sm:p-6 flex flex-col items-center">
+      
       {/* Settings Modal */}
       {isSettingsOpen && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white p-6 rounded-2xl w-full max-w-md shadow-2xl animate-in zoom-in-95">
-            <div className="flex justify-between items-center mb-4">
+          <div className="bg-white p-6 rounded-2xl w-full max-w-md shadow-2xl animate-in zoom-in-95 overflow-y-auto max-h-[90vh]">
+            <div className="flex justify-between items-center mb-6 border-b pb-4">
               <h3 className="font-bold text-lg flex items-center gap-2"><Settings size={20} /> 환경 설정</h3>
-              <button onClick={() => setIsSettingsOpen(false)}><X size={20} className="text-gray-400" /></button>
+              <button onClick={() => setIsSettingsOpen(false)}><X size={20} className="text-gray-400 hover:text-gray-600" /></button>
             </div>
-            <div className="mb-6">
-              <label className="block text-sm font-semibold text-gray-700 mb-2">색상 테마 (등락 표시)</label>
-              <div className="flex gap-2">
+
+            {/* Exchange Rate Setting */}
+            <div className="mb-8">
+              <label className="block text-sm font-bold text-gray-800 mb-3 flex items-center gap-2">
+                <Globe size={16} /> 환율 설정 (1 USD)
+              </label>
+              <div className="bg-gray-50 p-4 rounded-xl border border-gray-100">
+                <div className="flex gap-2 mb-4">
+                  <button 
+                    onClick={() => setExchangeMode("auto")} 
+                    className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${exchangeMode === 'auto' ? "bg-blue-600 text-white shadow-md" : "bg-white border text-gray-600 hover:bg-gray-100"}`}
+                  >
+                    자동 (API)
+                  </button>
+                  <button 
+                    onClick={() => setExchangeMode("manual")} 
+                    className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${exchangeMode === 'manual' ? "bg-blue-600 text-white shadow-md" : "bg-white border text-gray-600 hover:bg-gray-100"}`}
+                  >
+                    수동 입력
+                  </button>
+                </div>
+                
+                {exchangeMode === 'manual' ? (
+                  <div className="animate-in fade-in slide-in-from-top-2">
+                     <label className="block text-xs font-semibold text-gray-500 mb-1">적용할 환율 (원)</label>
+                     <div className="flex items-center gap-2">
+                       <input 
+                         type="number" 
+                         value={manualRate} 
+                         onChange={(e) => setManualRate(parseFloat(e.target.value) || 0)}
+                         className="flex-1 p-2 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+                       />
+                       <span className="text-sm font-bold text-gray-700">KRW</span>
+                     </div>
+                     <p className="text-xs text-gray-400 mt-2">API 장애 시 이 값을 사용해 계산합니다.</p>
+                  </div>
+                ) : (
+                   <div className="text-sm text-gray-600 flex justify-between items-center animate-in fade-in">
+                     <span>현재 API 환율:</span>
+                     <span className="font-bold text-blue-600">{exchangeRate.toLocaleString()} KRW</span>
+                   </div>
+                )}
+              </div>
+            </div>
+
+            {/* API Key Setting */}
+            <div className="mb-8">
+              <label className="block text-sm font-bold text-gray-800 mb-2">Finnhub API Key</label>
+              <div className="relative">
+                <input type="password" className={`w-full p-3 pr-20 rounded-lg border outline-none ${testStatus === "success" ? "border-green-500 bg-green-50" : "border-gray-200"}`} placeholder="API 키 입력" value={apiKey} onChange={(e) => { setApiKey(e.target.value); setTestStatus("idle"); }} />
+                <button onClick={testApiKey} className="absolute right-2 top-2 bottom-2 px-3 bg-white border shadow-sm hover:bg-gray-50 text-xs rounded font-medium">연결 확인</button>
+              </div>
+              {testStatus === "success" && <p className="text-xs text-green-600 mt-1">✅ 연결되었습니다.</p>}
+            </div>
+
+            {/* Theme Setting */}
+            <div>
+               <label className="block text-sm font-bold text-gray-800 mb-2">색상 테마</label>
+               <div className="flex gap-2">
                 <button onClick={() => setTheme("global")} className={`flex-1 py-2 rounded-lg border text-sm ${theme === "global" ? "bg-blue-50 border-blue-500 text-blue-700 font-bold" : "border-gray-200"}`}>글로벌 (초록=상승)</button>
                 <button onClick={() => setTheme("korea")} className={`flex-1 py-2 rounded-lg border text-sm ${theme === "korea" ? "bg-red-50 border-red-500 text-red-700 font-bold" : "border-gray-200"}`}>한국형 (빨강=상승)</button>
               </div>
-            </div>
-            <div className="mb-4">
-              <label className="block text-sm font-semibold text-gray-700 mb-1">Finnhub API Key</label>
-              <div className="relative">
-                <input type="password" className={`w-full p-3 pr-20 rounded-lg border outline-none ${testStatus === "success" ? "border-green-500" : "border-gray-200"}`} placeholder="API 키 입력" value={apiKey} onChange={(e) => { setApiKey(e.target.value); setTestStatus("idle"); }} />
-                <button onClick={testApiKey} className="absolute right-2 top-2 bottom-2 px-3 bg-gray-100 hover:bg-gray-200 text-xs rounded">연결 확인</button>
-              </div>
-              <p className="text-xs text-gray-400 mt-2">* API 키는 이 기기에만 저장됩니다.</p>
             </div>
           </div>
         </div>
@@ -565,7 +699,9 @@ export default function App() {
             <p className="text-sm text-gray-500 mb-4">{selectedAsset.name} ({selectedAsset.ticker || "자산"})</p>
             <div className="space-y-4">
               <div>
-                <label className="block text-xs font-semibold text-gray-500 mb-1">거래 단가</label>
+                <label className="block text-xs font-semibold text-gray-500 mb-1">
+                  거래 단가 ({currency})
+                </label>
                 <input type="number" step="any" required className="w-full p-3 rounded-lg border border-gray-200 focus:border-blue-500 outline-none" value={tradePrice} onChange={(e) => setTradePrice(e.target.value)} />
               </div>
               <div>
@@ -590,21 +726,48 @@ export default function App() {
               <Users size={12} /> Personal
             </span>
           </h1>
-          {/* Exchange Rate Indicator */}
-          <div className="text-xs text-gray-500 mt-1 flex items-center gap-1">
-            <Globe size={10} /> 
-            <span>1 USD = <span className="font-bold text-gray-700">{exchangeRate.toLocaleString()} KRW</span> (실시간)</span>
+          
+          <div className="flex items-center gap-2 mt-2">
+            <button 
+              onClick={() => setIsSettingsOpen(true)}
+              className="flex items-center gap-1.5 bg-white px-2.5 py-1 rounded-full border shadow-sm hover:border-blue-300 transition-colors"
+            >
+              <div className={`w-1.5 h-1.5 rounded-full ${exchangeMode === 'auto' ? 'bg-green-500' : 'bg-orange-500'}`}></div>
+              <div className="text-xs text-gray-500">
+                1 USD = <span className="font-bold text-gray-700">{exchangeRate.toLocaleString()}원</span>
+              </div>
+            </button>
+            
+            <button 
+              onClick={toggleCurrency}
+              className="flex items-center gap-1.5 bg-gray-900 text-white px-3 py-1 rounded-full shadow-sm hover:bg-gray-800 transition-all text-xs font-bold"
+            >
+              <Repeat size={12} />
+              {currency === 'KRW' ? '₩ 원화 보기' : '$ 달러 보기'}
+            </button>
           </div>
         </div>
         
-        <div className="flex gap-2 w-full sm:w-auto">
-          <button onClick={() => setIsSettingsOpen(true)} className="p-2 text-gray-500 hover:bg-gray-100 rounded-lg"><Settings size={20} /></button>
-          <button onClick={refreshPrices} disabled={isRefreshing} className={`bg-white border text-gray-600 px-3 py-2 rounded-lg flex gap-2 flex-1 sm:flex-none justify-center ${isRefreshing ? "opacity-50" : ""}`}>
-            <RefreshCw size={18} className={isRefreshing ? "animate-spin" : ""} /> <span className="">시세 연동</span>
-          </button>
-          <button onClick={() => setIsFormOpen(!isFormOpen)} className="bg-blue-600 text-white px-4 py-2 rounded-lg flex gap-2 shadow-sm flex-1 sm:flex-none justify-center">
-            {isFormOpen ? "닫기" : <><Plus size={18} /> 추가</>}
-          </button>
+        <div className="flex flex-col items-end gap-2 w-full sm:w-auto">
+          <div className="flex gap-2 w-full sm:w-auto">
+            <button onClick={() => setIsSettingsOpen(true)} className="p-2 text-gray-500 hover:bg-gray-100 rounded-lg"><Settings size={20} /></button>
+            <button 
+              onClick={refreshPrices} 
+              disabled={isRefreshing} 
+              className={`bg-white border text-gray-600 px-3 py-2 rounded-lg flex gap-2 flex-1 sm:flex-none justify-center items-center ${isRefreshing ? "bg-blue-50 border-blue-200 text-blue-700" : ""}`}
+            >
+              <RefreshCw size={18} className={isRefreshing ? "animate-spin text-blue-600" : ""} /> 
+              <span>{isRefreshing ? "조회 중..." : "시세 연동"}</span>
+            </button>
+            <button onClick={() => setIsFormOpen(!isFormOpen)} className="bg-blue-600 text-white px-4 py-2 rounded-lg flex gap-2 shadow-sm flex-1 sm:flex-none justify-center">
+              {isFormOpen ? "닫기" : <><Plus size={18} /> 추가</>}
+            </button>
+          </div>
+          {isRefreshing && (
+             <div className="w-full bg-gray-200 rounded-full h-1 overflow-hidden mt-1">
+               <div className="bg-blue-500 h-1 transition-all duration-300" style={{ width: `${refreshProgress}%` }}></div>
+             </div>
+          )}
         </div>
       </div>
 
@@ -626,7 +789,15 @@ export default function App() {
                   <h2 className="text-sm font-bold text-gray-700 flex items-center gap-2"><LayoutGrid size={16} /> 포트폴리오 맵</h2>
                   <span className="text-[10px] text-gray-400 bg-gray-50 px-2 py-1 rounded">크기:비중 / 색상:수익</span>
                 </div>
-                <div className="flex-1 w-full h-full min-h-[300px]"><Treemap assets={assets} width={300} height={300} theme={theme} /></div>
+                <div className="flex-1 w-full h-full min-h-[300px]">
+                  <Treemap 
+                    assets={assets} 
+                    width={300} 
+                    height={300} 
+                    theme={theme} 
+                    formatValue={formatValue}
+                  />
+                </div>
               </>
             )}
             {tab === "dashboard" && (
@@ -638,7 +809,13 @@ export default function App() {
             {tab === "history" && (
               <>
                 <h2 className="text-sm font-bold text-gray-700 mb-2 flex gap-2"><TrendingUp size={16} /> 자산 성장 추이</h2>
-                <div className="flex-1 w-full min-h-[200px]"><LineChart data={history} /></div>
+                <div className="flex-1 w-full min-h-[200px]">
+                  <LineChart 
+                    data={history} 
+                    formatValue={formatValue} 
+                    getConvertedValue={getConvertedValue}
+                  />
+                </div>
               </>
             )}
           </div>
@@ -649,11 +826,11 @@ export default function App() {
           <div className="bg-gradient-to-r from-gray-900 to-gray-800 p-6 rounded-2xl shadow-lg text-white flex justify-between items-center">
             <div>
               <div className="text-gray-400 text-sm mb-1">현재 총 자산</div>
-              <div className="text-3xl font-bold tracking-tight">{formatMoney(totalAssets)}</div>
+              <div className="text-3xl font-bold tracking-tight">{formatValue(totalAssets)}</div>
             </div>
             <div className="text-right">
               <div className={`text-sm font-medium flex items-center justify-end gap-1 ${totalReturnRate >= 0 ? (theme === "korea" ? "text-red-400" : "text-green-400") : (theme === "korea" ? "text-blue-400" : "text-red-400")}`}>
-                {totalReturnRate >= 0 ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />} {totalReturnRate.toFixed(2)}% ({formatMoney(totalReturn)})
+                {totalReturnRate >= 0 ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />} {totalReturnRate.toFixed(2)}% ({formatValue(totalReturn)})
               </div>
               <div className="text-gray-400 text-xs">총 수익률</div>
             </div>
@@ -677,7 +854,7 @@ export default function App() {
                     <input type="number" step="0.00000001" placeholder="수량" className="p-3 border rounded-lg" value={quantity} onChange={(e) => setQuantity(e.target.value)} />
                   </>
                 )}
-                <input type="text" placeholder="총 매수 금액 (원)" className="p-3 border rounded-lg col-span-2" value={amountInput} onChange={(e) => setAmountInput(e.target.value)} required />
+                <input type="text" placeholder={`총 매수 금액 (${currency})`} className="p-3 border rounded-lg col-span-2" value={amountInput} onChange={(e) => setAmountInput(e.target.value)} required />
               </div>
               <div className="flex justify-end gap-2">
                 <button type="button" onClick={resetForm} className="px-4 py-2 bg-gray-100 rounded">취소</button>
@@ -709,13 +886,13 @@ export default function App() {
                         </div>
                         <div className="text-xs text-gray-500 flex gap-2">
                           {asset.quantity ? <span>{asset.quantity}주(개)</span> : <span>{asset.date}</span>}
-                          {asset.quantity && asset.purchaseAmount > 0 && <span>평단 {formatMoney(asset.purchaseAmount / asset.quantity)}</span>}
+                          {asset.quantity && asset.purchaseAmount > 0 && <span>평단 {formatValue(asset.purchaseAmount / asset.quantity)}</span>}
                         </div>
                       </div>
                     </div>
                     <div className="flex items-center gap-4">
                       <div className="text-right">
-                        <div className="font-bold text-gray-900">{formatMoney(asset.amount)}</div>
+                        <div className="font-bold text-gray-900">{formatValue(asset.amount)}</div>
                         {asset.category !== "Cash" && <div className={`text-xs font-medium ${profitColor}`}>{isProfit ? "+" : ""}{roi.toFixed(2)}%</div>}
                       </div>
                       <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
