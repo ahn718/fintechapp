@@ -44,6 +44,7 @@ if (typeof document !== 'undefined' && !document.getElementById('tailwind-script
 }
 
 // --- 1. Firebase Configuration ---
+// 배포 환경에서도 동일한 프로젝트를 사용하도록 제공된 구성으로 고정합니다.
 const firebaseConfig = {
   apiKey: "AIzaSyC1IElcIPL5_mxevrCoG3iZr4gvrCIM5M8",
   authDomain: "our-asset-manager.firebaseapp.com",
@@ -256,6 +257,7 @@ export default function App() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [testStatus, setTestStatus] = useState<'idle' | 'success' | 'error'>('idle');
   const [authError, setAuthError] = useState<string | null>(null);
+  const [firestoreError, setFirestoreError] = useState<string | null>(null);
 
   // Input State
   const [name, setName] = useState('');
@@ -296,6 +298,7 @@ export default function App() {
       } as Asset));
       loadedAssets.sort((a, b) => b.amount - a.amount);
       setAssets(loadedAssets);
+      setFirestoreError(null);
     }, (error) => console.error("Assets Sync Error:", error));
 
     const unsubHistory = onSnapshot(historyCollection, (snapshot) => {
@@ -304,6 +307,7 @@ export default function App() {
         ...doc.data()
       } as AssetHistory));
       setHistory(loadedHistory);
+      setFirestoreError(null);
     }, (error) => console.error("History Sync Error:", error));
 
     return () => {
@@ -367,7 +371,12 @@ export default function App() {
     try {
       await addDoc(collection(db, 'families', SHARED_APP_ID, 'assets'), newAsset);
       resetForm();
-    } catch (e) { alert("저장 실패 (Firestore 규칙을 확인하세요): " + e); }
+      setFirestoreError(null);
+    } catch (e: any) {
+      console.error(e);
+      setFirestoreError(e.message || String(e));
+      alert("저장 실패 (Firestore 규칙을 확인하세요): " + e);
+    }
   };
 
   const handleTrade = async (e: React.FormEvent) => {
@@ -409,7 +418,12 @@ export default function App() {
     try {
       await updateDoc(doc(db, 'families', SHARED_APP_ID, 'assets', selectedAsset.id), updated);
       setTradeModalOpen(false);
-    } catch (e) { alert("거래 실패"); }
+      setFirestoreError(null);
+    } catch (e: any) {
+      console.error(e);
+      setFirestoreError(e.message || String(e));
+      alert("거래 실패");
+    }
   };
 
   const handleDelete = async (id: string) => {
@@ -417,7 +431,12 @@ export default function App() {
     if (window.confirm('정말 삭제하시겠습니까?')) {
       try {
         await deleteDoc(doc(db, 'families', SHARED_APP_ID, 'assets', id));
-      } catch (e) { alert("삭제 실패"); }
+        setFirestoreError(null);
+      } catch (e: any) {
+        console.error(e);
+        setFirestoreError(e.message || String(e));
+        alert("삭제 실패");
+      }
     }
   };
 
@@ -497,7 +516,19 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-800 font-sans p-2 sm:p-6 flex flex-col items-center">
-      
+
+      {firestoreError && (
+        <div className="w-full max-w-6xl mb-4 p-4 bg-amber-50 border border-amber-200 text-amber-700 rounded-xl flex items-start gap-3">
+          <AlertCircle className="mt-0.5 flex-shrink-0" size={18} />
+          <div className="text-sm leading-relaxed">
+            <p className="font-semibold">Firestore에 기록할 수 없습니다.</p>
+            <p className="mt-1">배포 환경(Vercel 등)에서 Firebase 보안 규칙 또는 App Check 설정으로 인해 권한이 거부된 것 같습니다.</p>
+            <p className="mt-1">Firebase 콘솔에서 Firestore 규칙을 업데이트하고, 프로젝트 설정에 맞는 환경 변수(REACT_APP_FIREBASE_*)를 추가한 뒤 다시 시도해주세요.</p>
+            <p className="mt-1 text-xs text-amber-600">에러 메시지: {firestoreError}</p>
+          </div>
+        </div>
+      )}
+
       {/* Settings Modal */}
       {isSettingsOpen && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
